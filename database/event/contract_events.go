@@ -18,13 +18,12 @@ type ContractEvent struct {
 	ContractAddress common.Address `gorm:"serializer:bytes"`
 	TransactionHash common.Hash    `gorm:"serializer:bytes"`
 	LogIndex        uint64
-	BlockNumber     *big.Int    `gorm:"serializer:u256"`
 	EventSignature  common.Hash `gorm:"serializer:bytes"`
 	Timestamp       uint64
 	RLPLog          *types.Log `gorm:"serializer:rlp;column:rlp_bytes"`
 }
 
-func ContractEventFromLog(log *types.Log, timestamp uint64, blockNumber *big.Int) ContractEvent {
+func ContractEventFromLog(log *types.Log, timestamp uint64) ContractEvent {
 	eventSig := common.Hash{}
 	if len(log.Topics) > 0 {
 		eventSig = log.Topics[0]
@@ -35,7 +34,6 @@ func ContractEventFromLog(log *types.Log, timestamp uint64, blockNumber *big.Int
 		TransactionHash: log.TxHash,
 		ContractAddress: log.Address,
 		EventSignature:  eventSig,
-		BlockNumber:     blockNumber,
 		LogIndex:        uint64(log.Index),
 		Timestamp:       timestamp,
 		RLPLog:          log,

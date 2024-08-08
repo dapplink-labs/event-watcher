@@ -55,7 +55,10 @@ func (ep *EventProcessor) Start() error {
 	tickerL1Worker := time.NewTicker(time.Second * 5)
 	ep.tasks.Go(func() error {
 		for range tickerL1Worker.C {
-
+			err := ep.processTreasureManagerEvents()
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -92,7 +95,6 @@ func (ep *EventProcessor) processTreasureManagerEvents() error {
 	if err := ep.db.Transaction(func(tx *database.DB) error {
 		log.Info("scanning for initiated bridge events", "fromHeight", fromHeight, "toHeight", toHeight)
 		return dapplink.ProcessDepositEvents(tx, ep.chainConfig, fromHeight, toHeight)
-
 	}); err != nil {
 		return err
 	}

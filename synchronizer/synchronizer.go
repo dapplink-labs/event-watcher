@@ -48,24 +48,26 @@ func NewSynchronizer(cfg *config.Config, db *database.DB, client node.EthClient,
 	}
 	var fromHeader *types.Header
 	if latestHeader != nil {
-		log.Warn("detected last indexed block", "number", latestHeader.Number, "hash", latestHeader.Hash)
+		log.Info("sync detected last indexed block", "number", latestHeader.Number, "hash", latestHeader.Hash)
 		fromHeader = latestHeader.RLPHeader.Header()
-	} else if cfg.Chain.StartingHeight > 0 {
-		log.Info("no indexed state starting from supplied L1 height;", "height =", cfg.Chain.StartingHeight)
+	} else if cfg.Chain.BlockStep > 0 {
+		log.Info("no sync indexed state starting from supplied ethereum height", "height", cfg.Chain.StartingHeight)
 		header, err := client.BlockHeaderByNumber(big.NewInt(int64(cfg.Chain.StartingHeight)))
 		if err != nil {
 			return nil, fmt.Errorf("could not fetch starting block header: %w", err)
 		}
 		fromHeader = header
 	} else {
-		log.Info("no indexed state, starting from genesis")
+		log.Info("no eth wallet indexed state")
 	}
+
+	headerTraversal := node.NewHeaderTraversal(client, fromHeader, big.NewInt(0), cfg.Chain.ChainId)
 
 	resCtx, resCancel := context.WithCancel(context.Background())
 	return &Synchronizer{
 		loopInterval:     time.Duration(cfg.Chain.LoopInterval) * time.Second,
 		headerBufferSize: uint64(cfg.Chain.BlockStep),
-		headerTraversal:  node.NewHeaderTraversal(client, fromHeader, big.NewInt(int64(cfg.Chain.Confirmations)), cfg.Chain.ChainId),
+		headerTraversal:  headerTraversal,
 		ethClient:        client,
 		latestHeader:     fromHeader,
 		db:               db,
@@ -86,11 +88,12 @@ func (syncer *Synchronizer) Start() error {
 			if len(syncer.headers) > 0 {
 				log.Info("retrying previous batch")
 			} else {
-				newHeaders, err := syncer.headerTraversal.NextHeaders(syncer.headerBufferSize)
+				newHeaders, err := syncer.headerTraversal.NextHeaders(uint64(syncer.chainCfg.BlockStep))
 				if err != nil {
-					log.Info("error querying for headers", "err", err)
+					log.Error("error querying for headers", "err", err)
+					continue
 				} else if len(newHeaders) == 0 {
-					log.Info("no new headers. syncer at head?")
+					log.Warn("no new headers. syncer at head?")
 				} else {
 					syncer.headers = newHeaders
 				}
@@ -121,6 +124,7 @@ func (syncer *Synchronizer) processBatch(headers []types.Header, chainCfg *confi
 		header := headers[i]
 		headerMap[header.Hash()] = &header
 	}
+	log.Info("chainCfg Contracts", "contract address", chainCfg.Contracts[0])
 	filterQuery := ethereum.FilterQuery{FromBlock: firstHeader.Number, ToBlock: lastHeader.Number, Addresses: chainCfg.Contracts}
 	logs, err := syncer.ethClient.FilterLogs(filterQuery)
 	if err != nil {
@@ -160,9 +164,7 @@ func (syncer *Synchronizer) processBatch(headers []types.Header, chainCfg *confi
 			continue
 		}
 		timestamp := headerMap[logEvent.BlockHash].Time
-		blockNumber := headerMap[logEvent.BlockHash].Number
-		chainContractEvent[i] = event.ContractEventFromLog(&logs.Logs[i], timestamp, blockNumber)
-
+		chainContractEvent[i] = event.ContractEventFromLog(&logs.Logs[i], timestamp)
 	}
 
 	retryStrategy := &retry.ExponentialStrategy{Min: 1000, Max: 20_000, MaxJitter: 250}

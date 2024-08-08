@@ -2,6 +2,7 @@ package event_watcher
 
 import (
 	"context"
+	"github.com/the-web3/event-watcher/synchronizer/node"
 
 	"sync/atomic"
 
@@ -11,7 +12,6 @@ import (
 	"github.com/the-web3/event-watcher/database"
 	"github.com/the-web3/event-watcher/event"
 	"github.com/the-web3/event-watcher/synchronizer"
-	"github.com/the-web3/event-watcher/synchronizer/node"
 )
 
 type EventWatcher struct {
@@ -42,7 +42,7 @@ func NewEventWatcher(ctx context.Context, cfg *config.Config, shutdown context.C
 
 	eventProcessor, err := event.NewEventProcessor(db, cfg.Chain, shutdown)
 	if err != nil {
-		log.Error("new evet processor fail", "err", err)
+		log.Error("new event processor fail", "err", err)
 		return nil, err
 	}
 

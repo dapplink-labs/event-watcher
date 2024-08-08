@@ -3,14 +3,13 @@ package synchronizer
 import (
 	"context"
 	"fmt"
-	"log"
 	"math/big"
-	"strconv"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 
 	"github.com/the-web3/event-watcher/common/tasks"
 	"github.com/the-web3/event-watcher/config"
@@ -22,90 +21,85 @@ import (
 	"github.com/the-web3/event-watcher/synchronizer/retry"
 )
 
-type Config struct {
-	LoopIntervalMsec  uint
-	HeaderBufferSize  uint
-	StartHeight       *big.Int
-	ConfirmationDepth *big.Int
-	ChainId           uint
-}
-
 type Synchronizer struct {
+	ethClient node.EthClient
+	db        *database.DB
+
 	loopInterval     time.Duration
 	headerBufferSize uint64
 	headerTraversal  *node.HeaderTraversal
-	ethClient        node.EthClient
-	headers          []types.Header
-	LatestHeader     *types.Header
-	resourceCtx      context.Context
-	resourceCancel   context.CancelFunc
-	tasks            tasks.Group
-	db               *database.DB
-	chainId          string
-	ymlCfg           *config.Config
+
+	headers      []types.Header
+	latestHeader *types.Header
+
+	startHeight       *big.Int
+	confirmationDepth *big.Int
+	chainCfg          *config.ChainConfig
+
+	resourceCtx    context.Context
+	resourceCancel context.CancelFunc
+	tasks          tasks.Group
 }
 
-func NewSynchronizer(ymlCfg *config.Config, cfg *Config, db *database.DB, client node.EthClient, shutdown context.CancelCauseFunc) (*Synchronizer, error) {
+func NewSynchronizer(cfg *config.Config, db *database.DB, client node.EthClient, shutdown context.CancelCauseFunc) (*Synchronizer, error) {
 	latestHeader, err := db.Blocks.LatestBlockHeader()
 	if err != nil {
 		return nil, err
 	}
 	var fromHeader *types.Header
 	if latestHeader != nil {
-		log.Println("detected last indexed block", "number", latestHeader.Number, "hash", latestHeader.Hash)
+		log.Warn("detected last indexed block", "number", latestHeader.Number, "hash", latestHeader.Hash)
 		fromHeader = latestHeader.RLPHeader.Header()
-	} else if cfg.StartHeight.BitLen() > 0 {
-		log.Println("no indexed state starting from supplied L1 height;", "height =", cfg.StartHeight.String())
-		header, err := client.BlockHeaderByNumber(cfg.StartHeight)
+	} else if cfg.Chain.StartingHeight > 0 {
+		log.Info("no indexed state starting from supplied L1 height;", "height =", cfg.Chain.StartingHeight)
+		header, err := client.BlockHeaderByNumber(big.NewInt(int64(cfg.Chain.StartingHeight)))
 		if err != nil {
-			log.Fatalf("fetch block header by number fail", "err", err)
 			return nil, fmt.Errorf("could not fetch starting block header: %w", err)
 		}
 		fromHeader = header
 	} else {
-		log.Println("no indexed state, starting from genesis")
+		log.Info("no indexed state, starting from genesis")
 	}
-	chainIdInt, _ := strconv.Atoi(strconv.Itoa(int(cfg.ChainId)))
-	log.Println("Support chain", "chainId=", chainIdInt)
+
 	resCtx, resCancel := context.WithCancel(context.Background())
 	return &Synchronizer{
-		loopInterval:     time.Duration(cfg.LoopIntervalMsec) * time.Second,
-		headerBufferSize: uint64(cfg.HeaderBufferSize),
-		headerTraversal:  node.NewHeaderTraversal(client, fromHeader, cfg.ConfirmationDepth, uint(chainIdInt)),
+		loopInterval:     time.Duration(cfg.Chain.LoopInterval) * time.Second,
+		headerBufferSize: uint64(cfg.Chain.BlockStep),
+		headerTraversal:  node.NewHeaderTraversal(client, fromHeader, big.NewInt(int64(cfg.Chain.Confirmations)), cfg.Chain.ChainId),
 		ethClient:        client,
-		LatestHeader:     fromHeader,
+		latestHeader:     fromHeader,
 		db:               db,
+		chainCfg:         &cfg.Chain,
 		resourceCtx:      resCtx,
 		resourceCancel:   resCancel,
 		tasks: tasks.Group{HandleCrit: func(err error) {
-			shutdown(fmt.Errorf("critical error in L1 Synchronizer: %w", err))
+			shutdown(fmt.Errorf("critical error in Synchronizer: %w", err))
 		}},
-		chainId: strconv.Itoa(int(cfg.ChainId)),
-		ymlCfg:  ymlCfg,
 	}, nil
 }
 
 func (syncer *Synchronizer) Start() error {
-	tickerSyncer := time.NewTicker(syncer.loopInterval)
+	// tickerSyncer := time.NewTicker(syncer.loopInterval)
+	tickerSyncer := time.NewTicker(time.Second * 3)
 	syncer.tasks.Go(func() error {
 		for range tickerSyncer.C {
 			if len(syncer.headers) > 0 {
-				log.Println("retrying previous batch")
+				log.Info("retrying previous batch")
 			} else {
 				newHeaders, err := syncer.headerTraversal.NextHeaders(syncer.headerBufferSize)
 				if err != nil {
-					log.Println("error querying for headers", "err", err)
+					log.Info("error querying for headers", "err", err)
 				} else if len(newHeaders) == 0 {
-					log.Println("no new headers. syncer at head?")
+					log.Info("no new headers. syncer at head?")
 				} else {
 					syncer.headers = newHeaders
 				}
 				latestHeader := syncer.headerTraversal.LatestHeader()
 				if latestHeader != nil {
-					log.Println("Latest header", "latestHeader Number", latestHeader.Number)
+					log.Info("Latest header", "latestHeader Number", latestHeader.Number)
 				}
 			}
-			err := syncer.processBatch(syncer.headers, syncer.ymlCfg)
+			err := syncer.processBatch(syncer.headers, syncer.chainCfg)
 			if err == nil {
 				syncer.headers = nil
 			}
@@ -115,26 +109,22 @@ func (syncer *Synchronizer) Start() error {
 	return nil
 }
 
-func (syncer *Synchronizer) processBatch(headers []types.Header, ymlCfg *config.Config) error {
+func (syncer *Synchronizer) processBatch(headers []types.Header, chainCfg *config.ChainConfig) error {
 	if len(headers) == 0 {
 		return nil
 	}
 	firstHeader, lastHeader := headers[0], headers[len(headers)-1]
-	log.Println("extracting batch", "size", len(headers))
+	log.Info("extracting batch", "size", len(headers), "startBlock", firstHeader.Number.String(), "endBlock", lastHeader.Number.String())
 
 	headerMap := make(map[common.Hash]*types.Header, len(headers))
 	for i := range headers {
 		header := headers[i]
 		headerMap[header.Hash()] = &header
 	}
-	addresses := make([]common.Address, len(ymlCfg.Contracts))
-	addresses[0] = common.HexToAddress(ymlCfg.Contracts[0])
-	addresses[1] = common.HexToAddress(ymlCfg.Contracts[1])
-
-	filterQuery := ethereum.FilterQuery{FromBlock: firstHeader.Number, ToBlock: lastHeader.Number, Addresses: addresses}
+	filterQuery := ethereum.FilterQuery{FromBlock: firstHeader.Number, ToBlock: lastHeader.Number, Addresses: chainCfg.Contracts}
 	logs, err := syncer.ethClient.FilterLogs(filterQuery)
 	if err != nil {
-		log.Println("failed to extract logs", "err", err)
+		log.Info("failed to extract logs", "err", err)
 		return err
 	}
 
@@ -145,7 +135,7 @@ func (syncer *Synchronizer) processBatch(headers []types.Header, ymlCfg *config.
 	}
 
 	if len(logs.Logs) > 0 {
-		log.Println("detected logs", "size", len(logs.Logs))
+		log.Info("detected logs", "size", len(logs.Logs))
 	}
 
 	blockHeaders := make([]common2.BlockHeader, 0, len(headers))
@@ -186,7 +176,7 @@ func (syncer *Synchronizer) processBatch(headers []types.Header, ymlCfg *config.
 			}
 			return nil
 		}); err != nil {
-			log.Println("unable to persist batch", err)
+			log.Info("unable to persist batch", err)
 			return nil, fmt.Errorf("unable to persist batch: %w", err)
 		}
 		return nil, nil

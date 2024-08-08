@@ -1,38 +1,106 @@
 package config
 
 import (
-	"gopkg.in/yaml.v2"
-	"io/ioutil"
+	"github.com/ethereum/go-ethereum/common"
+	"time"
+
+	"github.com/urfave/cli/v2"
+
+	"github.com/ethereum/go-ethereum/log"
+
+	"github.com/the-web3/event-watcher/flags"
+)
+
+const (
+	defaultConfirmations = 64
+	defaultLoopInterval  = 5000
 )
 
 type Config struct {
-	Migrations      string   `yaml:"migrations"`
-	PolygonRpc      string   `yaml:"polygon_rpc"`
-	RpcUrl          string   `yaml:"rpc_url"`
-	PolygonChainId  string   `yaml:"polygon_chain_id"`
-	HttpHost        string   `yaml:"http_host"`
-	HttpPort        int      `yaml:"http_port"`
-	DbHost          string   `yaml:"db_host"`
-	DbPort          int      `yaml:"db_port"`
-	DbName          string   `yaml:"db_name"`
-	DbUser          string   `yaml:"db_user"`
-	DbPassword      string   `yaml:"db_password"`
-	MetricsHost     string   `yaml:"metrics_host"`
-	MetricsPort     int      `yaml:"metrics_port"`
-	StartBlock      uint64   `yaml:"start_block"`
-	EventStartBlock uint64   `yaml:"event_start_block"`
-	Contracts       []string `yaml:"contracts"`
+	Migrations     string
+	Chain          ChainConfig
+	MasterDB       DBConfig
+	SlaveDB        DBConfig
+	SlaveDbEnable  bool
+	ApiCacheEnable bool
+	HTTPServer     ServerConfig
 }
 
-func New(path string) (*Config, error) {
-	var config = new(Config)
-	data, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, err
+type ChainConfig struct {
+	ChainRpcUrl    string
+	ChainId        uint
+	StartingHeight uint64
+	Confirmations  uint64
+	BlockStep      uint64
+	Contracts      []common.Address
+	LoopInterval   time.Duration
+}
+
+type DBConfig struct {
+	Host     string
+	Port     int
+	Name     string
+	User     string
+	Password string
+}
+
+type ServerConfig struct {
+	Host string
+	Port int
+}
+
+func LoadConfig(cliCtx *cli.Context) (Config, error) {
+	var cfg Config
+	cfg = NewConfig(cliCtx)
+
+	if cfg.Chain.Confirmations == 0 {
+		cfg.Chain.Confirmations = defaultConfirmations
 	}
-	err = yaml.Unmarshal(data, config)
-	if err != nil {
-		return nil, err
+
+	if cfg.Chain.LoopInterval == 0 {
+		cfg.Chain.LoopInterval = defaultLoopInterval
 	}
-	return config, nil
+
+	log.Info("loaded chain config", "config", cfg.Chain)
+	return cfg, nil
+}
+
+func LoadContracts() []common.Address {
+	var Contracts []common.Address
+	Contracts = append(Contracts, TreasureManagerAddr)
+	return Contracts
+}
+
+func NewConfig(ctx *cli.Context) Config {
+	return Config{
+		Migrations: ctx.String(flags.MigrationsFlag.Name),
+		Chain: ChainConfig{
+			ChainId:        ctx.Uint(flags.ChainIdFlag.Name),
+			ChainRpcUrl:    ctx.String(flags.ChainRpcFlag.Name),
+			StartingHeight: ctx.Uint64(flags.StartingHeightFlag.Name),
+			Confirmations:  ctx.Uint64(flags.ConfirmationsFlag.Name),
+			BlockStep:      ctx.Uint64(flags.BlocksStepFlag.Name),
+			Contracts:      LoadContracts(),
+			LoopInterval:   ctx.Duration(flags.LoopIntervalFlag.Name),
+		},
+		MasterDB: DBConfig{
+			Host:     ctx.String(flags.MasterDbHostFlag.Name),
+			Port:     ctx.Int(flags.MasterDbPortFlag.Name),
+			Name:     ctx.String(flags.MasterDbNameFlag.Name),
+			User:     ctx.String(flags.MasterDbUserFlag.Name),
+			Password: ctx.String(flags.MasterDbPasswordFlag.Name),
+		},
+		SlaveDB: DBConfig{
+			Host:     ctx.String(flags.SlaveDbHostFlag.Name),
+			Port:     ctx.Int(flags.SlaveDbPortFlag.Name),
+			Name:     ctx.String(flags.SlaveDbNameFlag.Name),
+			User:     ctx.String(flags.SlaveDbUserFlag.Name),
+			Password: ctx.String(flags.SlaveDbPasswordFlag.Name),
+		},
+		SlaveDbEnable: ctx.Bool(flags.SlaveDbEnableFlag.Name),
+		HTTPServer: ServerConfig{
+			Host: ctx.String(flags.HttpHostFlag.Name),
+			Port: ctx.Int(flags.HttpPortFlag.Name),
+		},
+	}
 }

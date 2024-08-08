@@ -349,7 +349,6 @@ func IsURLAvailable(address string) bool {
 		case "https", "wss":
 			addr += ":443"
 		default:
-			// Fail open if we can't figure out what the port should be
 			return true
 		}
 	}
@@ -357,6 +356,9 @@ func IsURLAvailable(address string) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	err = conn.Close()
+	if err != nil {
+		return false
+	}
 	return true
 }
